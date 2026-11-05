@@ -1,0 +1,341 @@
+diff --git a/app/lib/state/drawer_view_state.dart b/app/lib/state/drawer_view_state.dart
+index 6d29765..dd77e81 100644
+--- a/app/lib/state/drawer_view_state.dart
++++ b/app/lib/state/drawer_view_state.dart
+@@ -659,6 +659,23 @@ final class FilteredBlock extends DrawerBlock {
+   final DrawerFilter filter;
+ }
+ 
++/// A workspace and its conversations when 全部对话 groups by workspace.
++final class WorkspaceBlock extends DrawerBlock {
++  const WorkspaceBlock({
++    required this.workspaceId,
++    required this.title,
++    required this.collapsed,
++    required List<SessionSummary> items,
++  }) : super(items);
++
++  /// Id of the loose group (conversations attached to no workspace).
++  static const looseId = '_loose';
++
++  final String workspaceId;
++  final String title;
++  final bool collapsed;
++}
++
+ /// The drawer list as blocks. Every conversation shows once: in its folder
+ /// if it has one, else under 置顶 if pinned, else under its day.
+ List<DrawerBlock> drawerBlocks({
+@@ -671,6 +688,9 @@ List<DrawerBlock> drawerBlocks({
+   required Map<String, DateTime> createdAt,
+   required DateTime now,
+   bool scoped = false,
++  bool groupByWorkspace = false,
++  List<Workspace> workspaces = const [],
++  Map<String, bool> workspaceCollapsed = const {},
+ }) {
+   DateTime keyOf(SessionSummary s) =>
+       view.sort == DrawerSort.created ? (createdAt[s.sessionId] ?? s.updatedAt) : s.updatedAt;
+@@ -693,6 +713,50 @@ List<DrawerBlock> drawerBlocks({
+       ]),
+     ];
+   }
++  if (groupByWorkspace) {
++    final owner = <String, String>{};
++    for (final w in workspaces) {
++      for (final id in w.sessionIds) {
++        owner[id] = w.workspaceId;
++      }
++    }
++    final members = <String, List<SessionSummary>>{};
++    final loose = <SessionSummary>[];
++    for (final s in sorted) {
++      final id = owner[s.sessionId];
++      if (id == null) {
++        loose.add(s);
++      } else {
++        members.putIfAbsent(id, () => []).add(s);
++      }
++    }
++    final grouped = <DrawerBlock>[];
++    for (final w in workspaces) {
++      final items = members[w.workspaceId];
++      if (items == null || items.isEmpty) continue;
++      grouped.add(
++        WorkspaceBlock(
++          workspaceId: w.workspaceId,
++          title: w.title.trim().isEmpty
++              ? (w.path.isEmpty ? w.workspaceId : w.path.split('/').last)
++              : w.title,
++          collapsed: workspaceCollapsed[w.workspaceId] ?? false,
++          items: items,
++        ),
++      );
++    }
++    if (loose.isNotEmpty) {
++      grouped.add(
++        WorkspaceBlock(
++          workspaceId: WorkspaceBlock.looseId,
++          title: appL10n.commonOther,
++          collapsed: workspaceCollapsed[WorkspaceBlock.looseId] ?? false,
++          items: loose,
++        ),
++      );
++    }
++    return grouped;
++  }
+   final folderOf = view.folderOf;
+   final pinnedSet = pinnedIds.toSet();
+   final byId = {for (final s in sorted) s.sessionId: s};
+@@ -734,7 +798,8 @@ List<DrawerBlock> drawerBlocks({
+ /// folder are not).
+ List<String> drawerSelectableIds(List<DrawerBlock> blocks) => [
+   for (final block in blocks)
+-    if (block is! FolderBlock || !block.folder.collapsed)
++    if (!(block is FolderBlock && block.folder.collapsed) &&
++        !(block is WorkspaceBlock && block.collapsed))
+       for (final s in block.items) s.sessionId,
+ ];
+ 
+@@ -746,6 +811,8 @@ List<DrawerBlock>? watchDrawerBlocks(WidgetRef ref, {DateTime? now}) {
+   final scope = ref.watch(drawerScopeProvider);
+   if (scope == null) return null;
+   final view = ref.watch(drawerViewProvider);
++  final prefs = ref.watch(workspacePrefsProvider);
++  final sections = ref.watch(workspaceSectionsProvider);
+   return drawerBlocks(
+     sessions: scope.sessions,
+     pinnedIds: ref.watch(workspacesProvider.select((s) => s.pinnedSessionIds)),
+@@ -756,5 +823,10 @@ List<DrawerBlock>? watchDrawerBlocks(WidgetRef ref, {DateTime? now}) {
+     createdAt: view.sort == DrawerSort.created ? ref.watch(sessionCreatedProvider) : const {},
+     now: now ?? ref.watch(drawerClockProvider)(),
+     scoped: scope.scoped,
++    groupByWorkspace: prefs.loaded && prefs.selected == null && sections.isNotEmpty,
++    workspaces: [
++      for (final section in sections) ...section.items,
++    ],
++    workspaceCollapsed: prefs.collapsed,
+   );
+ }
+diff --git a/app/lib/state/workspaces_state.dart b/app/lib/state/workspaces_state.dart
+index 8a8842f..7ab1627 100644
+--- a/app/lib/state/workspaces_state.dart
++++ b/app/lib/state/workspaces_state.dart
+@@ -230,6 +230,7 @@ class WorkspacePrefs {
+     this.pinned = const [],
+     this.groups = const {},
+     this.recent = const [],
++    this.collapsed = const {},
+   });
+ 
+   factory WorkspacePrefs.fromJson(Object? json) {
+@@ -245,11 +246,24 @@ class WorkspacePrefs {
+             if (key is String && value is String && value.trim().isNotEmpty) key: value.trim(),
+       },
+       recent: _strings(map['recent']),
++      collapsed: _bools(map['collapsed']),
+     );
+   }
+ 
+   static List<String> _strings(Object? v) => v is List ? v.whereType<String>().toList() : const [];
+ 
++  static Map<String, bool> _bools(Object? v) {
++    final out = <String, bool>{};
++    if (v is Map) {
++      for (final entry in v.entries) {
++        final key = entry.key;
++        final value = entry.value;
++        if (key is String && value is bool) out[key] = value;
++      }
++    }
++    return out;
++  }
++
+   final bool loaded;
+ 
+   /// The workspace the drawer shows; null is 全部对话.
+@@ -261,24 +275,38 @@ class WorkspacePrefs {
+   /// Workspace id → group name.
+   final Map<String, String> groups;
+ 
+-  /// Folders picked recently, newest first.
++  /// Folder picked recently, newest first.
+   final List<String> recent;
+ 
++  /// Workspace id → whether its group is collapsed in 全部对话.
++  final Map<String, bool> collapsed;
++
+   static const maxRecent = 4;
+ 
+-  Map<String, Object?> toJson() => {'selected': ?selected, 'pinned': pinned, 'groups': groups, 'recent': recent};
++  Map<String, Object?> toJson() => {
++    'selected': ?selected,
++    'pinned': pinned,
++    'groups': groups,
++    'recent': recent,
++    'collapsed': {
++      for (final e in collapsed.entries)
++        if (e.value) e.key: true,
++    },
++  };
+ 
+   WorkspacePrefs copyWith({
+     String? Function()? selected,
+     List<String>? pinned,
+     Map<String, String>? groups,
+     List<String>? recent,
++    Map<String, bool>? collapsed,
+   }) => WorkspacePrefs(
+     loaded: loaded,
+     selected: selected == null ? this.selected : selected(),
+     pinned: pinned ?? this.pinned,
+     groups: groups ?? this.groups,
+     recent: recent ?? this.recent,
++    collapsed: collapsed ?? this.collapsed,
+   );
+ }
+ 
+@@ -360,6 +388,13 @@ class WorkspacePrefsController extends Notifier<WorkspacePrefs> {
+     ),
+   );
+ 
++  /// Opens or closes [workspaceId]'s group in 全部对话.
++  Future<void> setWorkspaceCollapsed(String workspaceId, bool collapsed) {
++    final next = Map<String, bool>.of(state.collapsed)..remove(workspaceId);
++    if (collapsed) next[workspaceId] = true;
++    return _save(state.copyWith(collapsed: next));
++  }
++
+   /// Drops everything about a removed workspace.
+   Future<void> forget(String workspaceId) => _save(
+     state.copyWith(
+@@ -369,6 +404,7 @@ class WorkspacePrefsController extends Notifier<WorkspacePrefs> {
+           if (id != workspaceId) id,
+       ],
+       groups: Map.of(state.groups)..remove(workspaceId),
++      collapsed: Map.of(state.collapsed)..remove(workspaceId),
+     ),
+   );
+ }
+diff --git a/app/lib/ui/shell/drawer/drawer_list.dart b/app/lib/ui/shell/drawer/drawer_list.dart
+index f991a1c..902d357 100644
+--- a/app/lib/ui/shell/drawer/drawer_list.dart
++++ b/app/lib/ui/shell/drawer/drawer_list.dart
+@@ -16,6 +16,7 @@ import '../../../state/workspaces_state.dart';
+ import '../../common/empty_view.dart';
+ import '../../theme/app_icons.dart';
+ import '../../theme/motion.dart';
++import '../../theme/theme.dart';
+ import '../sessions_drawer.dart' show sessionTitle;
+ import 'drawer_actions.dart';
+ import 'folder_header.dart';
+@@ -152,6 +153,29 @@ class DrawerConversationList extends ConsumerWidget {
+               childrenBuilder: () => [for (final s in items) tile(s, inFolder: true)],
+             ),
+           );
++        case WorkspaceBlock(:final workspaceId, :final title, :final collapsed, :final items):
++          final wsHeaderKey = ValueKey('workspace-$workspaceId');
++          add(
++            wsHeaderKey,
++            (_) => DrawerWorkspaceHeader(
++              key: wsHeaderKey,
++              title: title,
++              count: items.length,
++              open: !collapsed,
++              onTap: () => ref
++                  .read(workspacePrefsProvider.notifier)
++                  .setWorkspaceCollapsed(workspaceId, !collapsed),
++            ),
++          );
++          final wsBodyKey = ValueKey('workspace-body-$workspaceId');
++          add(
++            wsBodyKey,
++            (_) => DrawerFolderBody(
++              key: wsBodyKey,
++              open: !collapsed,
++              childrenBuilder: () => [for (final s in items) tile(s, inFolder: true)],
++            ),
++          );
+         case DayBlock(:final day, :final items):
+           final key = ValueKey('day-${day.name}');
+           add(key, (_) => DrawerEyebrow(sessionDayLabels[day]!, key: key));
+@@ -172,6 +196,79 @@ class DrawerConversationList extends ConsumerWidget {
+   }
+ }
+ 
++/// A workspace's row in 全部对话: icon, title, member count and a chevron
++/// that turns as the group opens. Tap: open or close.
++class DrawerWorkspaceHeader extends StatelessWidget {
++  const DrawerWorkspaceHeader({
++    super.key,
++    required this.title,
++    required this.count,
++    required this.open,
++    required this.onTap,
++  });
++
++  final String title;
++  final int count;
++  final bool open;
++  final VoidCallback onTap;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final colors = DshColors.of(context);
++    return Semantics(
++      button: true,
++      expanded: open,
++      label: title,
++      excludeSemantics: true,
++      child: Material(
++        type: MaterialType.transparency,
++        child: InkWell(
++          onTap: onTap,
++          customBorder: Squircle.border(AppShape.md),
++          child: SizedBox(
++            height: SessionTile.height,
++            child: Padding(
++              padding: const EdgeInsets.symmetric(horizontal: 10),
++              child: Row(
++                children: [
++                  Icon(AppIcons.workspaceGroup, size: 20, color: colors.textTertiary),
++                  const SizedBox(width: 10),
++                  Expanded(
++                    child: Text(
++                      title,
++                      maxLines: 1,
++                      overflow: TextOverflow.ellipsis,
++                      style: theme.textTheme.bodyLarge?.copyWith(
++                        fontSize: 15,
++                        height: 1.4,
++                        color: theme.colorScheme.onSurface,
++                        fontWeight: FontWeight.w500,
++                      ),
++                    ),
++                  ),
++                  const SizedBox(width: 8),
++                  Text(
++                    '$count',
++                    style: AppType.tabular(theme.textTheme.bodySmall!.copyWith(color: colors.textTertiary)),
++                  ),
++                  const SizedBox(width: 4),
++                  AnimatedRotation(
++                    turns: open ? 0 : -0.25,
++                    duration: AppMotion.of(context, AppMotion.collapse),
++                    curve: AppMotion.collapseCurve,
++                    child: Icon(AppIcons.expand, size: 18, color: colors.textTertiary),
++                  ),
++                ],
++              ),
++            ),
++          ),
++        ),
++      ),
++    );
++  }
++}
++
+ /// A status filter with no matches.
+ class _FilterEmpty extends StatelessWidget {
+   const _FilterEmpty(this.filter, {super.key});
