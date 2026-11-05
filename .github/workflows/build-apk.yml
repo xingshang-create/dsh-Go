@@ -1,4 +1,4 @@
-name: build-apk
+name: build-apk名称: 构建apk名称: 构建APK
 
 on:
   workflow_dispatch:
@@ -11,17 +11,17 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Free disk space
-        run: |
+        run: |运行: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL || true
           df -h /
 
       - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
+        with:使用:
+          distribution: temurin发行版: temurin发行版: Temurin发行版: temurin发行版: Temurin发行版: Temurin特穆林
+          java-version: '17'java版本: '17'Java版本: '17'
 
-      - uses: subosito/flutter-action@v2
-        with:
+      - uses: subosito/flutter-action@v2      - 用途: subosito/flutter-action@v2
+        with:使用:
           flutter-version: '3.47.7'
           channel: stable
 
@@ -30,12 +30,12 @@ jobs:
 
       - name: Flutter deps
         working-directory: app
-        run: |
+        run: |运行: |
           flutter pub get --enforce-lockfile
           printf 'sdk.dir=%s\nflutter.sdk=%s\n' "$ANDROID_HOME" "$FLUTTER_ROOT" > android/local.properties
 
       - name: Build runtime
-        run: bash runtime/build-runtime.sh arm64
+        run: bash runtime/build-runtime.sh arm64-v8a
 
       - name: Build APK
         run: bash tooling/build-apk.sh -f arm64
